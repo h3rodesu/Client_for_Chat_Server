@@ -41,6 +41,8 @@ struct ChatState {
     bool waitres = false;
     bool userisfind = false;
     int currentRoom = 0;
+    bool logout = false;
+    bool reconect=false;
 };
 void Learning(ChatState&state) {//Функция дял чтения,пока тут
  //   std::string welcome = read.receive(UserSocket);
@@ -108,6 +110,10 @@ void Learning(ChatState&state) {//Функция дял чтения,пока т
             state.chatHistory += "SYSTEM:Connection Error\n";//тк если врнклось 0 байт то коннекта нет
             state.isAuthorized = false;
             state.waitres = false;
+            if (state.UserSocket != INVALID_SOCKET) {
+                closesocket(state.UserSocket);
+                state.UserSocket = INVALID_SOCKET;
+           }
             break;
         }
     }
@@ -123,32 +129,37 @@ enum class FirstStat {
     REGISTRATION
 };
 
-bool ConToServ(SOCKET& servsock) {
-    if (servsock != INVALID_SOCKET) {//Если сокет открыт
-        closesocket(servsock);
-        servsock = INVALID_SOCKET;
+bool ConToServ(SOCKET& servsock, ChatState& state) {
+    
+     
+            if (servsock != INVALID_SOCKET) {//Если сокет открыт
+                closesocket(servsock);
+                servsock = INVALID_SOCKET;
+            }
+            servsock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (servsock == INVALID_SOCKET) {
+                closesocket(servsock);
+                return false;
+            }
+            sockaddr_in clientADDR;
+            clientADDR.sin_family = AF_INET;
+            clientADDR.sin_port = htons(8080);
+            if (inet_pton(AF_INET, "127.0.0.1", &clientADDR.sin_addr) <= 0) {
+                closesocket(servsock);//Если сокет умер до создания-удаляю
+                servsock = INVALID_SOCKET;
+                return false;//не подключился
+            }
+            if (connect(servsock, (sockaddr*)&clientADDR, sizeof(clientADDR)) < 0) {
+                closesocket(servsock);//логика с удалением та же
+                servsock = INVALID_SOCKET;
+                return false;//не подключился
+                std::this_thread::sleep_for(std::chrono::seconds(3));
+                //continue;//пока будет тут до логики реконнекта
+            }
+       
+        return true;//подключение успешн
     }
-    servsock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (servsock == INVALID_SOCKET) {
-        closesocket(servsock);
-        return 1;
-    }
-    sockaddr_in clientADDR;
-    clientADDR.sin_family = AF_INET;
-    clientADDR.sin_port = htons(8080);
-    if (inet_pton(AF_INET, "127.0.0.1", &clientADDR.sin_addr) <= 0) {
-        closesocket(servsock);//Если сокет умер до создания-удаляю
-        servsock =INVALID_SOCKET;
-        return false;//не подключился
-    }
-    if (connect(servsock, (sockaddr*)&clientADDR, sizeof(clientADDR)) < 0) {
-        closesocket(servsock);//логика с удалением та же
-        servsock = INVALID_SOCKET;
-        return false;//не подключился
-        //continue;//пока будет тут до логики реконнекта
-    }
-    return true;//подключение успешно
-}
+  
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {//Главная функция 
     bool IsConnect = false;
@@ -165,14 +176,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"ImGui Chat Class", nullptr };
     ::RegisterClassExW(&wc);
+   
+    
     ChatState states;
     std::jthread learn;
-    bool isConnected = ConToServ(states.UserSocket);
+    bool isConnected = ConToServ(states.UserSocket,states);
     if (isConnected == true) {
+        states.reconect = true;
         learn = std::jthread([&states]() {
             Learning(states);
             });
     }
+   
+   
 
     HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"Chat Client", WS_OVERLAPPEDWINDOW, 100, 100, 1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
 
@@ -210,10 +226,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             }
         }
         if (states.UserSocket == INVALID_SOCKET) {
-            std::string qstr = "QUIT\n";
+           /* std::string qstr = "QUIT\n";
             send(states.UserSocket, qstr.c_str(), (int)qstr.size(), 0);
             closesocket(states.UserSocket);
-            states.UserSocket = INVALID_SOCKET;
+            states.UserSocket = INVALID_SOCKET;*/
+            states.isAuthorized = false;
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            if (ConToServ(states.UserSocket,states)==true) {//если соединение восстановлено
+                learn = std::jthread([&states]() {
+                    Learning(states);
+                    });
+        }
         }
         if (!states.running) {
             break;
@@ -368,7 +391,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                             }
                         }
                         else {
-                            std::string fullmsg = "MSG|" + std::to_string(states.currentRoom) + "|" + msgstr + "\n";
+                            std::string fullmsg = "MSG|" + msgstr + "\n";
                             {
                                 std::lock_guard<std::recursive_mutex>msgmtx(mtx);
                                 send(states.UserSocket, fullmsg.c_str(), (int)fullmsg.size(), 0);
@@ -384,11 +407,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 if (ImGui::Button("log out")) {
                     std::string quitstr = "quit\n";
                     {
-
                         std::lock_guard<std::recursive_mutex>qmtxt(mtx);
                         send(states.UserSocket, quitstr.c_str(), (int)quitstr.size(), 0);
                     }
+                    states.logout = true;
                     states.isAuthorized = false; // возврат к предыдущему состоянию
+                
                 }
 
                 ImGui::End();
@@ -412,7 +436,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData()); // Отрисовка геометрии ImGui силами DirectX
             g_pSwapChain->Present(1, 0); // Подача готовой картинки на монитор с V-Sync
         }
-        states.running = false;
+      
         if (states.UserSocket != INVALID_SOCKET) {
             closesocket(states.UserSocket);
             states.UserSocket = INVALID_SOCKET;
@@ -442,7 +466,7 @@ bool CreateDeviceD3D(HWND hWnd)
     sd.BufferDesc.RefreshRate.Denominator = 1;
     sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.OutputWindow = hWnd;
+    sd.OutputWindow = hWnd;     
     sd.SampleDesc.Count = 1;
     sd.SampleDesc.Quality = 0;
     sd.Windowed = TRUE;
